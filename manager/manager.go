@@ -391,6 +391,10 @@ func (m *manager) Stop() error {
 	m.quitChannels = make([]chan error, 0, 2)
 	nvm.Finalize()
 	perf.Finalize()
+	// Flush and close backend storage drivers via the memory cache.
+	if err := m.memoryCache.Close(); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -16,6 +16,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -132,7 +133,19 @@ func (c *InMemoryCache) RecentStats(name string, start, end time.Time, maxStats 
 }
 
 func (c *InMemoryCache) Close() error {
+	var errs []error
+	for _, backend := range c.backend {
+		if err := backend.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	c.containerCacheMap = containerCacheMap{}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	if len(errs) > 1 {
+		return fmt.Errorf("multiple backend close errors: %v", errs)
+	}
 	return nil
 }
 

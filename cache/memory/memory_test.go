@@ -19,6 +19,7 @@ import (
 	"time"
 
 	info "github.com/google/cadvisor/info/v1"
+	"github.com/google/cadvisor/storage"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,4 +100,48 @@ func TestRecentStatsGetAllStats(t *testing.T) {
 	memoryCache := makeWithStats(t, 10)
 
 	assert.Len(t, getRecentStats(t, memoryCache, -1), 10)
+}
+
+// mockStorageDriver is a minimal storage driver used to verify that
+// InMemoryCache.Close() closes all backend drivers.
+type mockStorageDriver struct {
+	closed   bool
+	closeErr error
+	addCalls int
+}
+
+func (m *mockStorageDriver) AddStats(_ *info.ContainerInfo, _ *info.ContainerStats) error {
+	m.addCalls++
+	return nil
+}
+
+func (m *mockStorageDriver) Close() error {
+	m.closed = true
+	return m.closeErr
+}
+
+func TestCloseClosesBackendDrivers(t *testing.T) {
+	backend1 := &mockStorageDriver{}
+	backend2 := &mockStorageDriver{}
+	memoryCache := New(60*time.Second, []storage.StorageDriver{backend1, backend2})
+
+	// Add some stats first so there's state.
+	assert.NoError(t, memoryCache.AddStats(&cInfo, makeStat(0)))
+
+	err := memoryCache.Close()
+	assert.NoError(t, err)
+	assert.True(t, backend1.closed, "backend1 should be closed")
+	assert.True(t, backend2.closed, "backend2 should be closed")
+}
+
+func TestCloseHandlesBackendErrors(t *testing.T) {
+	backend1 := &mockStorageDriver{closeErr: assert.AnError}
+	backend2 := &mockStorageDriver{}
+	memoryCache := New(60*time.Second, []storage.StorageDriver{backend1, backend2})
+
+	err := memoryCache.Close()
+	assert.Error(t, err, "should report error from backend1")
+	// Both backends should still be closed even if one errors.
+	assert.True(t, backend1.closed, "backend1 should be closed")
+	assert.True(t, backend2.closed, "backend2 should be closed even if backend1 errored")
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/google/cadvisor/cache/memory"
 	_ "github.com/google/cadvisor/cmd/internal/storage/bigquery"
 	_ "github.com/google/cadvisor/cmd/internal/storage/elasticsearch"
+	_ "github.com/google/cadvisor/cmd/internal/storage/httpapi"
 	_ "github.com/google/cadvisor/cmd/internal/storage/influxdb"
 	_ "github.com/google/cadvisor/cmd/internal/storage/kafka"
 	_ "github.com/google/cadvisor/cmd/internal/storage/redis"
