@@ -728,9 +728,12 @@ func (cd *containerData) updateStats() error {
 		return err
 	}
 
+	cd.lock.Lock()
+	spec := cd.info.Spec
+	cd.lock.Unlock()
 	cInfo := info.ContainerInfo{
 		ContainerReference: ref,
-		Spec:               cd.info.Spec,
+		Spec:               spec,
 	}
 
 	err = cd.memoryCache.AddStats(&cInfo, stats)
