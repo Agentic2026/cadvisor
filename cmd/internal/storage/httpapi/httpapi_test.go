@@ -31,27 +31,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// newTestServer starts an httptest.Server that records all requests it receives.
-// The returned slice pointer is safe to read after the test driver is closed.
-func newTestServer(t *testing.T, statusCode int) (*httptest.Server, *[]capturedRequest, *atomic.Int32) {
+// requestLog is a thread-safe store of captured HTTP requests used by tests.
+type requestLog struct {
+	mu       sync.Mutex
+	requests []capturedRequest
+	count    atomic.Int32
+}
+
+func (l *requestLog) add(r capturedRequest) {
+	l.mu.Lock()
+	l.requests = append(l.requests, r)
+	l.mu.Unlock()
+	// Increment AFTER the append so that waitForN callers see a consistent
+	// snapshot: once count reaches n, the first n entries are fully written.
+	l.count.Add(1)
+}
+
+// snapshot returns a copy of all requests captured so far (safe to read concurrently).
+func (l *requestLog) snapshot() []capturedRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]capturedRequest, len(l.requests))
+	copy(out, l.requests)
+	return out
+}
+
+// waitForN blocks until at least n requests have been received or timeout elapses.
+func (l *requestLog) waitForN(t *testing.T, n int, timeout time.Duration) {
 	t.Helper()
-	requests := &[]capturedRequest{}
-	mu := &sync.Mutex{}
-	var count atomic.Int32
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if int(l.count.Load()) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d HTTP requests, got %d", n, l.count.Load())
+}
+
+// newTestServer starts an httptest.Server that records all requests it receives.
+func newTestServer(t *testing.T, statusCode int) (*httptest.Server, *requestLog) {
+	t.Helper()
+	log := &requestLog{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count.Add(1)
 		body, err := io.ReadAll(r.Body)
 		r.Body.Close()
 		if err != nil {
 			t.Errorf("test server: read body: %v", err)
 		}
-		mu.Lock()
-		*requests = append(*requests, capturedRequest{
+		log.add(capturedRequest{
 			method:  r.Method,
 			url:     r.URL.String(),
 			auth:    r.Header.Get("Authorization"),
@@ -59,11 +94,10 @@ func newTestServer(t *testing.T, statusCode int) (*httptest.Server, *[]capturedR
 			ua:      r.Header.Get("User-Agent"),
 			rawBody: body,
 		})
-		mu.Unlock()
 		w.WriteHeader(statusCode)
 	}))
 	t.Cleanup(srv.Close)
-	return srv, requests, &count
+	return srv, log
 }
 
 type capturedRequest struct {
@@ -144,19 +178,7 @@ func makeStats() *info.ContainerStats {
 	}
 }
 
-// waitForRequests polls until the test server has received at least `n`
-// requests or the timeout elapses.
-func waitForRequests(t *testing.T, count *atomic.Int32, n int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if int(count.Load()) >= n {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %d HTTP requests, got %d", n, count.Load())
-}
+
 
 // ---------------------------------------------------------------------------
 // Tests: environment variable validation
@@ -179,7 +201,7 @@ func TestNew_MissingToken(t *testing.T) {
 }
 
 func TestNew_BothVarsPresent(t *testing.T) {
-	srv, _, _ := newTestServer(t, 200)
+	srv, _ := newTestServer(t, 200)
 	t.Setenv("CADVISOR_METRICS_API_URL", srv.URL)
 	t.Setenv("CADVISOR_METRICS_API_TOKEN", "mytoken")
 
@@ -194,60 +216,64 @@ func TestNew_BothVarsPresent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAddStats_PostsToConfiguredURL(t *testing.T) {
-	srv, reqs, count := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 	require.NoError(t, drv.Close())
 
-	assert.GreaterOrEqual(t, int(count.Load()), 1, "expected at least one request")
-	captured := (*reqs)[0]
-	assert.Equal(t, http.MethodPost, captured.method)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1, "expected at least one request")
+	assert.Equal(t, http.MethodPost, reqs[0].method)
 }
 
 func TestAddStats_BearerTokenHeader(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "supersecret", 50*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	assert.Equal(t, "Bearer supersecret", (*reqs)[0].auth)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	assert.Equal(t, "Bearer supersecret", reqs[0].auth)
 }
 
 func TestAddStats_ContentTypeJSON(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	assert.Equal(t, "application/json", (*reqs)[0].ct)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	assert.Equal(t, "application/json", reqs[0].ct)
 }
 
 func TestAddStats_UserAgentHeader(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	assert.Contains(t, (*reqs)[0].ua, "httpapi-storage")
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	assert.Contains(t, reqs[0].ua, "httpapi-storage")
 }
 
 func TestAddStats_ValidJSONBatch(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	stats := makeStats()
 	require.NoError(t, drv.AddStats(makeCInfo("mycontainer", false), stats))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	env := (*reqs)[0].decodeEnvelope(t)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	env := reqs[0].decodeEnvelope(t)
 
 	assert.Equal(t, schemaVersion, env.SchemaVersion)
 	assert.Equal(t, "cadvisor", env.Source.Component)
@@ -263,30 +289,32 @@ func TestAddStats_ValidJSONBatch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAddStats_ContainerSpecIncludedWhenPresent(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	cInfo := makeCInfo("c-with-spec", true /* withSpec */)
 	require.NoError(t, drv.AddStats(cInfo, makeStats()))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	env := (*reqs)[0].decodeEnvelope(t)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	env := reqs[0].decodeEnvelope(t)
 	require.NotEmpty(t, env.Samples)
 	require.NotNil(t, env.Samples[0].ContainerSpec, "ContainerSpec should be present")
 	assert.Equal(t, "test-image:latest", env.Samples[0].ContainerSpec.Image)
 }
 
 func TestAddStats_ContainerSpecNilWhenAbsent(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 50*time.Millisecond)
 
 	cInfo := makeCInfo("c-no-spec", false /* withSpec */)
 	require.NoError(t, drv.AddStats(cInfo, makeStats()))
 	require.NoError(t, drv.Close())
 
-	require.GreaterOrEqual(t, len(*reqs), 1)
-	env := (*reqs)[0].decodeEnvelope(t)
+	reqs := log.snapshot()
+	require.GreaterOrEqual(t, len(reqs), 1)
+	env := reqs[0].decodeEnvelope(t)
 	require.NotEmpty(t, env.Samples)
 	assert.Nil(t, env.Samples[0].ContainerSpec, "ContainerSpec should be absent when not set")
 }
@@ -296,14 +324,14 @@ func TestAddStats_ContainerSpecNilWhenAbsent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFlushOnTimer(t *testing.T) {
-	srv, _, count := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	// Use a very short buffer so the timer triggers quickly.
 	drv := newDriverForTest(t, srv, "tok", 30*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 
 	// Wait for the timer to fire and produce a request, then close.
-	waitForRequests(t, count, 1, 2*time.Second)
+	log.waitForN(t, 1, 2*time.Second)
 
 	require.NoError(t, drv.Close())
 }
@@ -313,7 +341,7 @@ func TestFlushOnTimer(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFlushOnBatchSizeThreshold(t *testing.T) {
-	srv, reqs, count := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	// Use a very long buffer so only the batch-size threshold triggers the flush.
 	drv := newDriverForTest(t, srv, "tok", 10*time.Minute)
 
@@ -323,11 +351,11 @@ func TestFlushOnBatchSizeThreshold(t *testing.T) {
 	}
 
 	// Wait for the threshold-triggered flush.
-	waitForRequests(t, count, 1, 3*time.Second)
+	log.waitForN(t, 1, 3*time.Second)
 
 	// All samples should have been sent in one or more requests totalling maxBatchSize.
 	total := 0
-	for _, r := range *reqs {
+	for _, r := range log.snapshot() {
 		env := r.decodeEnvelope(t)
 		total += len(env.Samples)
 	}
@@ -341,7 +369,7 @@ func TestFlushOnBatchSizeThreshold(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClose_FlushesPendingSamples(t *testing.T) {
-	srv, reqs, _ := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	// Long timer so only Close() triggers the flush.
 	drv := newDriverForTest(t, srv, "tok", 10*time.Minute)
 
@@ -354,7 +382,7 @@ func TestClose_FlushesPendingSamples(t *testing.T) {
 	require.NoError(t, drv.Close())
 
 	total := 0
-	for _, r := range *reqs {
+	for _, r := range log.snapshot() {
 		env := r.decodeEnvelope(t)
 		total += len(env.Samples)
 	}
@@ -367,13 +395,13 @@ func TestClose_FlushesPendingSamples(t *testing.T) {
 
 func TestNon2xxResponse_DoesNotPanicAndIsLogged(t *testing.T) {
 	// The driver should not crash on non-2xx and should attempt subsequent flushes.
-	srv, _, count := newTestServer(t, 503)
+	srv, log := newTestServer(t, 503)
 	drv := newDriverForTest(t, srv, "tok", 30*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), makeStats()))
 
 	// Let at least one flush attempt happen.
-	waitForRequests(t, count, 1, 2*time.Second)
+	log.waitForN(t, 1, 2*time.Second)
 
 	// Close should not return an error even if the upload failed.
 	require.NoError(t, drv.Close())
@@ -448,12 +476,12 @@ func TestAddStats_NonBlockingWhenQueueFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAddStats_NilStats(t *testing.T) {
-	srv, _, count := newTestServer(t, 200)
+	srv, log := newTestServer(t, 200)
 	drv := newDriverForTest(t, srv, "tok", 30*time.Millisecond)
 
 	require.NoError(t, drv.AddStats(makeCInfo("c1", false), nil))
 	require.NoError(t, drv.Close())
 
 	// nil stats should never trigger a flush request.
-	assert.Zero(t, int(count.Load()), "nil stats should not produce any HTTP request")
+	assert.Zero(t, int(log.count.Load()), "nil stats should not produce any HTTP request")
 }
