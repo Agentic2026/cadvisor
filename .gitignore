@@ -1,4 +1,5 @@
 cadvisor
+cmd/cmd
 /release
 .vscode
 _output/
