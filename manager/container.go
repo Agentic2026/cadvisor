@@ -104,8 +104,9 @@ type containerData struct {
 	logUsage bool
 
 	// Tells the container to stop.
-	stop     chan struct{}
-	stopOnce sync.Once
+	stop           chan struct{}
+	stopOnce       sync.Once
+	housekeepingWg sync.WaitGroup // waited on in Stop() to ensure housekeeping has exited
 
 	// Tells the container to immediately collect stats
 	onDemandChan chan chan struct{}
@@ -132,6 +133,7 @@ func jitter(duration time.Duration, maxFactor float64) time.Duration {
 }
 
 func (cd *containerData) Start() error {
+	cd.housekeepingWg.Add(1)
 	go cd.housekeeping()
 	return nil
 }
@@ -147,6 +149,10 @@ func (cd *containerData) Stop() error {
 	cd.stopOnce.Do(func() {
 		close(cd.stop)
 	})
+	// Wait for the housekeeping goroutine to fully exit before returning.
+	// This guarantees callers (e.g. manager.Stop) know the goroutine is no
+	// longer using the shared memory cache.
+	cd.housekeepingWg.Wait()
 	cd.perfCollector.Destroy()
 	cd.resctrlCollector.Destroy()
 	return nil
@@ -524,6 +530,7 @@ func (cd *containerData) nextHousekeepingInterval() time.Duration {
 
 // TODO(vmarmol): Implement stats collecting as a custom collector.
 func (cd *containerData) housekeeping() {
+	defer cd.housekeepingWg.Done()
 	// Start any background goroutines - must be cleaned up in cd.handler.Cleanup().
 	cd.handler.Start()
 	defer cd.handler.Cleanup()

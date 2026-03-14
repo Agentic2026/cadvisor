@@ -391,6 +391,24 @@ func (m *manager) Stop() error {
 	m.quitChannels = make([]chan error, 0, 2)
 	nvm.Finalize()
 	perf.Finalize()
+
+	// Stop all per-container housekeeping goroutines and wait for them to
+	// fully exit before tearing down the shared memory cache.  Without this
+	// barrier, a goroutine can still be inside RecentStats() when Close()
+	// replaces the internal map, producing a data race under -race.
+	var wg sync.WaitGroup
+	m.containers.Range(func(_ namespacedContainerName, cont *containerData) bool {
+		wg.Add(1)
+		go func(c *containerData) {
+			defer wg.Done()
+			if err := c.Stop(); err != nil {
+				klog.V(3).Infof("manager.Stop: error stopping container %q: %v", c.info.Name, err)
+			}
+		}(cont)
+		return true
+	})
+	wg.Wait()
+
 	// Close the memory cache last so backend storage drivers (e.g. httpapi)
 	// can flush any buffered data before the process exits.
 	if err := m.memoryCache.Close(); err != nil {

@@ -99,6 +99,7 @@ func newContainerStore(ref info.ContainerReference, maxAge time.Duration) *conta
 }
 
 type InMemoryCache struct {
+	mu                sync.RWMutex // protects containerCacheMap field itself (not per-entry locks)
 	containerCacheMap containerCacheMap
 	maxAge            time.Duration
 	backend           []storage.StorageDriver
@@ -124,7 +125,9 @@ func (c *InMemoryCache) AddStats(cInfo *info.ContainerInfo, stats *info.Containe
 }
 
 func (c *InMemoryCache) RecentStats(name string, start, end time.Time, maxStats int) ([]*info.ContainerStats, error) {
+	c.mu.RLock()
 	cstore, ok := c.containerCacheMap.Load(name)
+	c.mu.RUnlock()
 	if !ok {
 		return nil, ErrDataNotFound
 	}
@@ -141,12 +144,16 @@ func (c *InMemoryCache) Close() error {
 			}
 		}
 	}
+	c.mu.Lock()
 	c.containerCacheMap = containerCacheMap{}
+	c.mu.Unlock()
 	return firstErr
 }
 
 func (c *InMemoryCache) RemoveContainer(containerName string) error {
+	c.mu.RLock()
 	c.containerCacheMap.Delete(containerName)
+	c.mu.RUnlock()
 	return nil
 }
 
