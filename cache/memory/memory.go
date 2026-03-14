@@ -132,8 +132,17 @@ func (c *InMemoryCache) RecentStats(name string, start, end time.Time, maxStats 
 }
 
 func (c *InMemoryCache) Close() error {
+	var firstErr error
+	for _, backend := range c.backend {
+		if err := backend.Close(); err != nil {
+			klog.Errorf("InMemoryCache.Close: backend %T returned error: %v", backend, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
 	c.containerCacheMap = containerCacheMap{}
-	return nil
+	return firstErr
 }
 
 func (c *InMemoryCache) RemoveContainer(containerName string) error {

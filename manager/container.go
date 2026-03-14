@@ -730,6 +730,7 @@ func (cd *containerData) updateStats() error {
 
 	cInfo := info.ContainerInfo{
 		ContainerReference: ref,
+		Spec:               cd.info.Spec,
 	}
 
 	err = cd.memoryCache.AddStats(&cInfo, stats)

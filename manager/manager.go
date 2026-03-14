@@ -391,6 +391,11 @@ func (m *manager) Stop() error {
 	m.quitChannels = make([]chan error, 0, 2)
 	nvm.Finalize()
 	perf.Finalize()
+	// Close the memory cache last so backend storage drivers (e.g. httpapi)
+	// can flush any buffered data before the process exits.
+	if err := m.memoryCache.Close(); err != nil {
+		klog.Errorf("manager.Stop: memoryCache.Close() returned error: %v", err)
+	}
 	return nil
 }
 
