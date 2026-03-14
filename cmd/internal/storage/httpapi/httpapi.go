@@ -308,7 +308,10 @@ func (d *httpAPIStorage) send(samples []sampleEntry) error {
 	// Always fully read and close the response body so the underlying
 	// TCP connection can be reused by the transport's connection pool.
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if readErr != nil {
+		klog.V(4).Infof("httpapi storage driver: failed to read response body: %v", readErr)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := string(respBody)

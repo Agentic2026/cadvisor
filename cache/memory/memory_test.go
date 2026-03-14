@@ -15,6 +15,7 @@
 package memory
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -135,12 +136,13 @@ func TestCloseClosesBackendDrivers(t *testing.T) {
 }
 
 func TestCloseHandlesBackendErrors(t *testing.T) {
-	backend1 := &mockStorageDriver{closeErr: assert.AnError}
+	backend1 := &mockStorageDriver{closeErr: fmt.Errorf("backend close failed")}
 	backend2 := &mockStorageDriver{}
 	memoryCache := New(60*time.Second, []storage.StorageDriver{backend1, backend2})
 
 	err := memoryCache.Close()
 	assert.Error(t, err, "should report error from backend1")
+	assert.Contains(t, err.Error(), "backend close failed")
 	// Both backends should still be closed even if one errors.
 	assert.True(t, backend1.closed, "backend1 should be closed")
 	assert.True(t, backend2.closed, "backend2 should be closed even if backend1 errored")
