@@ -30,6 +30,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"time"
 
 	info "github.com/google/cadvisor/info/v1"
@@ -205,8 +206,10 @@ func (s *httpAPIStorage) AddStats(cInfo *info.ContainerInfo, stats *info.Contain
 	refCopy := cInfo.ContainerReference
 
 	// If the caller provided Spec metadata, capture it too.
+	// ContainerSpec contains a map (Labels), so we must use reflect.DeepEqual
+	// rather than != to compare against the zero value.
 	var specCopy *info.ContainerSpec
-	if cInfo.Spec != (info.ContainerSpec{}) {
+	if !reflect.DeepEqual(cInfo.Spec, info.ContainerSpec{}) {
 		sc := cInfo.Spec
 		specCopy = &sc
 	}
